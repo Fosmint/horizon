@@ -254,6 +254,12 @@ impl SpriteAnimator {
     /// storage texture and reading two storage buffers (not OpenGL before
     /// 4.3).
     pub fn compute(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
+        // Qualcomm Adreno Vulkan driver on Android (seen on Adreno 720): creating the
+        // "Animated sprites" compute pipeline leaves the device unusable, every
+        // buffer made afterwards is invalid. The CPU path draws the same frames.
+        if cfg!(target_os = "android") && adapter.get_info().vendor == 0x5143 {
+            return false;
+        }
         let limits = device.limits();
         adapter
             .get_downlevel_capabilities()
