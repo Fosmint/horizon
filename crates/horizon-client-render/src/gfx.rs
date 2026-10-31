@@ -1728,6 +1728,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        probe(&device, &queue, "before sprite textures");
         let prepared = prepared.filter(|p| p.split == split).unwrap_or_else(|| {
             PreparedTextures::new(sprite_pixels, sprite_size, layers, sprite_mips, forcefield)
         });
@@ -1761,7 +1762,12 @@ impl Renderer {
                             | wgpu::TextureUsages::COPY_DST
                             // Shader packs' atlas copies them (pack_atlas.rs).
                             | wgpu::TextureUsages::COPY_SRC
-                            | wgpu::TextureUsages::STORAGE_BINDING,
+                            | if animate::SpriteAnimator::compute(&adapter, &device) {
+                                wgpu::TextureUsages::STORAGE_BINDING
+                            } else {
+                                // Compute is off (Adreno): the CPU path never binds it as storage.
+                                wgpu::TextureUsages::empty()
+                            },
                         view_formats: &[],
                     },
                     wgpu::util::TextureDataOrder::LayerMajor,
@@ -1769,6 +1775,7 @@ impl Renderer {
                 )
             })
             .collect();
+        probe(&device, &queue, "after sprite textures");
         let animations = animate::SpriteAnimator::new(
             &device,
             animations,
@@ -1778,6 +1785,7 @@ impl Renderer {
             split,
             animate::SpriteAnimator::compute(&adapter, &device),
         );
+        probe(&device, &queue, "after sprite animator");
         let sprite_unused = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Block sprites (unused)"),
@@ -1799,6 +1807,7 @@ impl Renderer {
             });
         let sprite_views = sprite_views(&sprite_textures, &sprite_unused, None);
         let sprite_sampler = device.create_sampler(&sprite_sampler_descriptor(0, 1));
+        probe(&device, &queue, "after sprite views");
         let lightmap = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Lightmap"),
             size: wgpu::Extent3d {
@@ -1840,6 +1849,7 @@ impl Renderer {
             &lightmap_view,
             &lightmap_sampler,
         );
+        probe(&device, &queue, "before quad indices");
         let index_quads = 1 << 16;
         let indices = Self::quad_indices(&device, &queue, index_quads);
         let instance_capacity = 4096;
@@ -7383,4 +7393,23 @@ fn reported(l: horizon_hdr::wayland::Luminances) -> crate::graphics::Reported {
         paper_white: 203,
         peak: peak.clamp(200, 10_000),
     }
+}
+
+
+/// Logs whether the device still hands out working buffers (Adreno 720 loses it
+/// somewhere during start-up; the probe lines show where).
+fn probe(device: &wgpu::Device, queue: &wgpu::Queue, stage: &str) {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Horizon probe"),
+        size: 4,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, &[0u8; 4]);
+    match pollster::block_on(scope.pop()) {
+        None => log::info!("Horizon probe {stage}: ok"),
+        Some(e) => log::error!("Horizon probe {stage}: BROKEN ({e})"),
+    }
+    log::logger().flush();
 }
